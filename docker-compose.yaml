@@ -397,9 +397,7 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       KAFKA_BROKER_URL: "kafka:9092"
       DATABASE_URL_ASYNC: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}"
-      # CORS: whitelist the React dashboard dev server.
-      # Update this to your production domain before deploying.
-      ALLOWED_ORIGINS: "http://localhost:5173,http://localhost:5174,http://localhost:3000"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS}"
     depends_on:
       redis:
         condition: service_healthy

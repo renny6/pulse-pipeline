@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     # exact origins where the React dashboard is hosted.
     # Example env var: ALLOWED_ORIGINS=http://localhost:5173,https://pulse.example.com
     # --------------------------------------------------------------------------
-    allowed_origins: list[str] = Field(
+    allowed_origins: list[str] | str = Field(
         default=["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"]
     )
 
@@ -99,8 +99,25 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_origins(cls, v: object) -> list[str]:
         """Accept either a JSON array or a comma-separated string from env."""
+        if v is None:
+            return ["*"]
         if isinstance(v, str):
-            return [o.strip() for o in v.split(",") if o.strip()]
+            val = v.strip()
+            if not val:
+                return ["*"]
+            if val.startswith("[") and val.endswith("]"):
+                import json
+                try:
+                    parsed = json.loads(val)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed]
+                except json.JSONDecodeError:
+                    pass
+            return [o.strip() for o in val.split(",") if o.strip()]
+        if isinstance(v, list):
+            if not v:
+                return ["*"]
+            return [str(item).strip() for item in v]
         return v  # type: ignore[return-value]
 
 
