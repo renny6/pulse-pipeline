@@ -21,8 +21,10 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        # Look for .env in the project root (one level above backend/)
-        env_file=".env",
+        # Load from multiple locations in priority order (last wins).
+        # When uvicorn runs from backend/, it finds 'backend/.env' first.
+        # When Docker runs, environment: blocks override these entirely.
+        env_file=(".env", "backend/.env"),
         env_file_encoding="utf-8",
         # Ignore unmapped env vars — Docker injects many system vars
         extra="ignore",
@@ -40,16 +42,20 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # Redis — Global Guard
     # Inside Docker: redis://redis:6379/0   (Docker DNS name)
-    # From host:     redis://localhost:6379/0
+    # From host:     redis://localhost:6379/0  ← also the default
     # --------------------------------------------------------------------------
-    redis_url: str = Field(default="redis://redis:6379/0")
+    redis_url: str = Field(default="redis://localhost:6379/0")
 
     # --------------------------------------------------------------------------
     # Kafka — Message Bus
-    # Inside Docker: kafka:9092            (INTERNAL listener)
-    # From host:     localhost:9094        (EXTERNAL listener)
+    # Inside Docker: kafka:9092   (INTERNAL listener — only within pulse-net)
+    # From host:     localhost:9094  ← EXTERNAL listener, host-mapped port
+    #
+    # IMPORTANT: Do NOT use localhost:9092 from the host. Port 9092 is the
+    # INTERNAL listener; it is not exposed outside the Docker network.
+    # Port 9094 is the EXTERNAL listener mapped by docker-compose.
     # --------------------------------------------------------------------------
-    kafka_broker_url: str = Field(default="kafka:9092")
+    kafka_broker_url: str = Field(default="localhost:9094")
     kafka_topic_ingestion: str = Field(default="pulse.events.raw")
     kafka_topic_dlq: str = Field(default="pulse.events.dlq")
 

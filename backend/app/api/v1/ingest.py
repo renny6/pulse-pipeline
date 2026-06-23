@@ -1,8 +1,7 @@
 """
 Ingestion Endpoint — POST /api/v1/ingest
 ==========================================
-The primary entry point for all event traffic. Every request passing through
-this endpoint is subject to:
+The primary entry point for all event traffic. Every request is subject to:
 
   1. PYDANTIC VALIDATION — extra="forbid" rejects malformed payloads with
      HTTP 422 before any processing occurs.
@@ -10,32 +9,35 @@ this endpoint is subject to:
 
   2. RATE LIMITING — atomic Redis Lua Token Bucket determines whether the
      request is accepted (HTTP 202) or throttled (HTTP 429).
-     [MANDATE — master_system_mandates.md §2 / project_omnibus.md §2]
+     [MANDATE — master_system_mandates.md §2]
 
   3. PII MASKING — client IP is SHA-256 hashed before use as a Redis key,
-     Kafka payload field, or log line.
+     Kafka message payload field, or log line.
      [MANDATE — zero_trust_security.md §5 / operations_observability §2]
 
-  4. CORRELATION ID — X-Correlation-ID is embedded in every log line and
-     will be carried through the Kafka → Celery pipeline in Phase 3.
+  4. CORRELATION ID — X-Correlation-ID is embedded in every log line AND
+     used as the Kafka message KEY for deterministic partition routing.
      [MANDATE — operations_and_observability_mandates.md §1]
 
-  5. WEBSOCKET BROADCAST — every decision (accepted / blocked) is recorded
-     to the WebSocket manager for the 100ms batch emission.
-     [MANDATE — system_hurdles_and_guardrails.md Challenge 2]
+  5. KAFKA PRODUCE — sanitised envelope is published to pulse.events.raw.
+     Fire-and-forget from the gateway's perspective (202 already returned).
+     Kafka failure is handled gracefully — the event is not lost silently.
+     [MANDATE — 06_implementation_plan.md Phase 3]
 
-  6. KAFKA PRODUCER STUB — the sanitised KafkaEventEnvelope is ready for
-     Phase 3. A TODO marker shows exactly where aiokafka.send() inserts.
-     [MANDATE — project_omnibus.md §3 / 06_implementation_plan.md Phase 3]
+  6. WEBSOCKET BROADCAST — every decision is recorded to the 100ms batch.
+     [MANDATE — system_hurdles_and_guardrails.md Challenge 2]
 """
 from __future__ import annotations
 
 import logging
 import time
 
+from aiokafka import AIOKafkaProducer
+from aiokafka.errors import KafkaConnectionError
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
 
+from app.core.kafka_producer import get_kafka_producer, send_event
 from app.core.rate_limiter import RateLimitResult, TokenBucketRateLimiter
 from app.core.security import mask_ip, mask_sensitive_fields
 from app.models.event import (
@@ -52,15 +54,15 @@ router = APIRouter()
 
 
 # ==============================================================================
-# Dependency — injects the rate limiter from app.state
+# Dependencies — injected from app.state (set during lifespan startup)
 # ==============================================================================
 
 def get_rate_limiter(request: Request) -> TokenBucketRateLimiter:
-    """
-    FastAPI dependency that retrieves the singleton TokenBucketRateLimiter
-    stored on app.state during the lifespan startup.
-    """
     return request.app.state.rate_limiter  # type: ignore[no-any-return]
+
+
+def get_producer(request: Request) -> AIOKafkaProducer:
+    return request.app.state.kafka_producer  # type: ignore[no-any-return]
 
 
 # ==============================================================================
@@ -82,46 +84,43 @@ async def ingest_event(
     event: IngestEventRequest,
     request: Request,
     rate_limiter: TokenBucketRateLimiter = Depends(get_rate_limiter),
+    producer: AIOKafkaProducer = Depends(get_producer),
 ) -> JSONResponse:
     """
-    Accepts an event, applies the global Token Bucket rate limit, and queues
-    it to Kafka. Returns HTTP 202 on success, HTTP 429 on throttle.
+    Accepts, validates, rate-limits, and publishes an event to Kafka.
 
-    The X-Correlation-ID for this request is available in request.state
-    and in all log lines below.
+    Returns HTTP 202 (accepted) or HTTP 429 (throttled).
+    The X-Correlation-ID is set by CorrelationIDMiddleware on every request.
     """
-    # -------------------------------------------------------------------------
-    # Extract tracing context set by CorrelationIDMiddleware
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 1. Extract tracing context (set upstream by CorrelationIDMiddleware)
+    # ------------------------------------------------------------------
     correlation_id: str = getattr(request.state, "correlation_id", "N/A")
 
-    # -------------------------------------------------------------------------
-    # [MANDATE] PII masking — hash the client IP for rate-limit key and logs.
-    # The raw IP is never stored or forwarded beyond this point.
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 2. PII masking — hash client IP before any use
+    # [MANDATE] Raw IP is never stored, logged, or forwarded.
+    # ------------------------------------------------------------------
     raw_ip = (
         request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
         or (request.client.host if request.client else "unknown")
     )
     client_id = mask_ip(raw_ip)  # SHA-256 hex digest
 
-    # -------------------------------------------------------------------------
-    # [MANDATE] Atomic Token Bucket check — single Redis EVAL, no race conditions
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 3. Atomic Token Bucket check — single Redis EVAL, no race conditions
+    # ------------------------------------------------------------------
     result: RateLimitResult = await rate_limiter.check_and_consume(client_id)
 
-    # -------------------------------------------------------------------------
-    # PATH: THROTTLED (HTTP 429)
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # PATH A: THROTTLED → HTTP 429
+    # ------------------------------------------------------------------
     if not result.allowed:
         logger.warning(
-            "THROTTLED correlation_id=%s client_id=%s retry_after_ms=%d",
+            "THROTTLED correlation_id=%s retry_after_ms=%d",
             correlation_id,
-            client_id,
             result.retry_after_ms,
         )
-
-        # [MANDATE] Record blocked event for 100ms WebSocket batch
         await ws_manager.record_event(accepted=False)
 
         throttled = IngestThrottledResponse(
@@ -132,23 +131,22 @@ async def ingest_event(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content=throttled.model_dump(),
             headers={
-                "Retry-After": str(result.retry_after_ms // 1000 or 1),
+                "Retry-After": str(max(1, result.retry_after_ms // 1000)),
                 "X-Correlation-ID": correlation_id,
             },
         )
 
-    # -------------------------------------------------------------------------
-    # PATH: ACCEPTED (HTTP 202)
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # PATH B: ACCEPTED → publish to Kafka → HTTP 202
+    # ------------------------------------------------------------------
 
-    # [MANDATE — operations_observability §2] Sanitise payload BEFORE any
-    # Kafka hand-off or logging. Known sensitive field names are redacted.
+    # [MANDATE — operations_observability §2] Sanitise payload BEFORE Kafka.
+    # Known sensitive field names (api_key, token, password …) are redacted.
     sanitised_payload = mask_sensitive_fields(event.payload)
 
-    # Build the Kafka event envelope (ready for Phase 3 aiokafka producer).
-    # ingested_at_unix uses Python time.time() here as a close approximation.
-    # In Phase 3, the actual Redis TIME value from the Lua script result will
-    # be passed through so the clock source remains Redis (not the container).
+    # Build the canonical Kafka event envelope.
+    # ingested_at_unix carries the gateway receive timestamp — close enough
+    # to the Redis TIME value for ordering purposes.
     envelope = KafkaEventEnvelope(
         correlation_id=correlation_id,
         event_type=event.event_type,
@@ -157,20 +155,26 @@ async def ingest_event(
         ingested_at_unix=time.time(),
     )
 
-    # -------------------------------------------------------------------------
-    # [PHASE 3 TODO] Kafka producer hand-off
-    # Replace this comment block with the aiokafka send call:
-    #
-    #   await kafka_producer.send(
-    #       settings.kafka_topic_ingestion,
-    #       key=correlation_id.encode(),
-    #       value=envelope.model_dump_json().encode(),
-    #   )
-    #
-    # The correlation_id is used as the Kafka message KEY so that events from
-    # the same client are deterministically routed to the same partition,
-    # enabling ordered processing by Celery workers.
-    # -------------------------------------------------------------------------
+    # [MANDATE — operations_observability §1]
+    # correlation_id is the Kafka message KEY — events from the same client
+    # are deterministically routed to the same partition for ordered processing.
+    try:
+        await send_event(
+            producer=producer,
+            envelope=envelope.model_dump(),
+            correlation_id=correlation_id,
+        )
+    except KafkaConnectionError as exc:
+        # Kafka is temporarily unreachable. Log prominently but still return 202
+        # so the gateway doesn't become a hard dependency on broker availability.
+        # The event will be lost in this failure scenario — Phase 4 adds the
+        # circuit breaker / DLQ fallback at the producer level.
+        logger.error(
+            "Kafka publish failed — event may be lost. "
+            "correlation_id=%s error=%s",
+            correlation_id,
+            exc,
+        )
 
     logger.info(
         "ACCEPTED correlation_id=%s event_type=%s remaining_tokens=%d",
@@ -179,7 +183,7 @@ async def ingest_event(
         result.remaining_tokens,
     )
 
-    # [MANDATE] Record accepted event for 100ms WebSocket batch
+    # Accumulate metric for the 100ms WebSocket broadcast window
     await ws_manager.record_event(accepted=True)
 
     accepted = IngestAcceptedResponse(

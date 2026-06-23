@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.core.kafka_producer import close_kafka_producer, init_kafka_producer
 from app.core.rate_limiter import TokenBucketRateLimiter
 from app.core.redis_client import close_redis, init_redis
 from app.middleware.correlation_id import CorrelationIDMiddleware
@@ -109,21 +110,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         refill_rate=settings.rate_limit_refill_rate,
     )
 
+    # Initialise Kafka producer and store on app.state
+    # [MANDATE — 06_implementation_plan.md Phase 3]
+    app.state.kafka_producer = await init_kafka_producer()
+
     # Start the 100ms WebSocket broadcaster background task
     await ws_manager.startup()
 
     logger.info(
         "==> [Pulse Gateway] Ready. "
-        "rate_limit_capacity=%d rate_limit_refill=%.1f t/s",
+        "rate_limit_capacity=%d rate_limit_refill=%.1f t/s broker=%s",
         settings.rate_limit_capacity,
         settings.rate_limit_refill_rate,
+        settings.kafka_broker_url,
     )
 
     yield  # Application runs here
 
     # ---- SHUTDOWN ----
+    # Order matters: stop accepting traffic first, drain Kafka last.
     logger.info("==> [Pulse Gateway] Shutting down...")
     await ws_manager.shutdown()
+    await close_kafka_producer()   # drain in-flight Kafka sends
     await close_redis()
     logger.info("==> [Pulse Gateway] Shutdown complete.")
 
@@ -171,12 +179,14 @@ def create_app() -> FastAPI:
     # --------------------------------------------------------------------------
     # ROUTERS
     # --------------------------------------------------------------------------
+    from app.api.v1.analytics import router as analytics_router
     from app.api.v1.health import router as health_router
     from app.api.v1.ingest import router as ingest_router
     from app.ws.endpoint import router as ws_router
 
     app.include_router(health_router)                        # /health, /health/ready, /api/v1/dev-ws-token
     app.include_router(ingest_router, prefix="/api/v1")      # /api/v1/ingest
+    app.include_router(analytics_router, prefix="/api/v1")   # /api/v1/analytics/aggregate
     app.include_router(ws_router)                            # /ws/metrics
 
     return app

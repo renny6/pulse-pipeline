@@ -423,3 +423,116 @@ services:
         reservations:
           cpus: "0.25"
           memory: 256M
+
+  # ----------------------------------------------------------------------------
+  # 7. CELERY WORKER (Phase 3)
+  # Receives micro-batched event arrays from the Kafka consumer daemon and
+  # persists them to TimescaleDB via a single multi-row INSERT … ON CONFLICT.
+  #
+  # [MANDATE] task_serializer='json' — no pickle (RCE prevention)
+  # [MANDATE] worker_max_tasks_per_child=500 — memory leak recycling
+  # [MANDATE] soft_time_limit=25 / time_limit=30 — zombie task elimination
+  # [MANDATE] worker_process_init signal — pre-fork engine pool disposal
+  # [MANDATE] Resource limits prevent runaway scaling under volumetric attacks
+  #           (operations_and_observability_mandates.md §4)
+  # ----------------------------------------------------------------------------
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pulse-celery-worker
+    hostname: celery-worker
+    restart: unless-stopped
+    networks:
+      - pulse-net
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      KAFKA_BROKER_URL: "kafka:9092"
+      DATABASE_URL_ASYNC: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    # Celery CLI entrypoint — overrides the Dockerfile CMD
+    command: >
+      celery -A app.worker.celery_app worker
+        --loglevel=info
+        --concurrency=4
+        --pool=prefork
+        --max-tasks-per-child=500
+        --queues=celery
+        --hostname=worker@%h
+    # No ports exposed — workers communicate only via Redis broker
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping -d worker@$${HOSTNAME} || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ----------------------------------------------------------------------------
+  # 8. KAFKA CONSUMER DAEMON (Phase 3)
+  # Two-tier thread-decoupled aiokafka consumer.
+  #
+  # Tier 1 (poll loop): Pulls records from Kafka at high frequency with a
+  # small max_poll_records window. Places records into asyncio.Queue. Sends
+  # heartbeat acknowledgement immediately — NEVER stalls.
+  #
+  # Tier 2 (batch dispatcher): Drains the queue and fires a Celery task when
+  # 500 records OR 2 seconds have accumulated (whichever comes first).
+  #
+  # [MANDATE — Challenge 6] aiokafka consumer is separate from Celery
+  # [MANDATE — Challenge 12] Poll thread decoupled from execution thread
+  # ----------------------------------------------------------------------------
+  kafka-consumer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pulse-kafka-consumer
+    hostname: kafka-consumer
+    restart: unless-stopped
+    networks:
+      - pulse-net
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      KAFKA_BROKER_URL: "kafka:9092"
+      DATABASE_URL_ASYNC: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      celery-worker:
+        condition: service_healthy
+    # Standalone asyncio entry point — overrides Dockerfile CMD
+    command: ["python", "-m", "app.worker.kafka_consumer"]
+    healthcheck:
+      # Consumer daemon writes to stdout — check the process is alive
+      test: ["CMD-SHELL", "pgrep -f 'kafka_consumer' || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
