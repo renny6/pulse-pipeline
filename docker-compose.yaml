@@ -91,17 +91,20 @@ services:
       ZOOKEEPER_SYNC_LIMIT: 5
       # Suppress leader election noise in logs
       ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+      # [FIX] CP 7.x disables 4-letter-word commands by default.
+      # Explicitly whitelist 'ruok' so the health check can query liveness.
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "ruok"
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
       - zookeeper-logs:/var/lib/zookeeper/log
     healthcheck:
       # ruok = "Are you OK?" — standard Zookeeper four-letter command.
       # A healthy node responds with "imok".
-      test: [ "CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok" ]
+      test: ["CMD", "bash", "-c", "echo 'ruok' | nc 127.0.0.1 2181"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 20s
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -327,7 +330,7 @@ services:
       - pulse-net
     ports:
       # Expose only on localhost — application uses timescaledb:5432 on pulse-net
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5444:5432"
     environment:
       # [MANDATE] All credentials sourced from .env — no hardcoded values
       POSTGRES_USER: ${POSTGRES_USER}
