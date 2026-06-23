@@ -1,0 +1,36 @@
+# ==============================================================================
+# PULSE PIPELINE — Backend Python Dependencies
+# Pinned versions for fully reproducible builds.
+# ==============================================================================
+
+# --- Web Framework & ASGI Server (Phase 2) ---
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# --- Redis Client — hiredis for C-accelerated parsing (Phase 2) ---
+redis[hiredis]==5.0.4
+
+# --- Data Validation & Environment Settings (Phase 2) ---
+pydantic==2.7.1
+pydantic-settings==2.3.0
+
+# --- JWT — WebSocket secure handshake (Phase 2) ---
+python-jose[cryptography]==3.3.0
+
+# --- Kafka Async Client (Phase 3) ---
+aiokafka==0.11.0
+
+# --- HTTP Client — external API calls with timeout enforcement (Phase 4) ---
+httpx==0.27.0
+
+# --- Resilience Patterns (Phase 4) ---
+tenacity==8.3.0      # exponential backoff + jitter
+pybreaker==1.2.0     # circuit breaker pattern
+
+# --- Database — async SQLAlchemy + asyncpg driver (Phase 3) ---
+asyncpg==0.29.0
+sqlalchemy[asyncio]==2.0.30
+alembic==1.13.1
+
+# --- Task Queue — Celery with Redis broker (Phase 3) ---
+celery[redis]==5.4.0

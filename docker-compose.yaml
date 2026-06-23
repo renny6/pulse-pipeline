@@ -100,7 +100,7 @@ services:
     healthcheck:
       # ruok = "Are you OK?" — standard Zookeeper four-letter command.
       # A healthy node responds with "imok".
-      test: ["CMD", "bash", "-c", "echo 'ruok' | nc 127.0.0.1 2181"]
+      test: [ "CMD", "bash", "-c", "echo 'ruok' | nc 127.0.0.1 2181" ]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -363,3 +363,63 @@ services:
         reservations:
           cpus: "0.25"
           memory: 512M
+
+  # ----------------------------------------------------------------------------
+  # 6. FASTAPI GATEWAY (Phase 2)
+  # Stateless ingestion gateway. All state lives in Redis (token buckets) and
+  # Kafka (event stream). Scale horizontally with: docker compose scale api=N
+  #
+  # [MANDATE] URL env vars are overridden here to use Docker-internal DNS names
+  #   (redis, kafka, timescaledb) rather than the localhost values in .env,
+  #   which only work when running Python directly on the host machine.
+  # [MANDATE] Depends on redis + kafka + timescaledb being healthy before start.
+  # [MANDATE] Resource limits cap runaway scaling during volumetric attacks.
+  #           (operations_and_observability_mandates.md §4)
+  # ----------------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pulse-api
+    hostname: api
+    restart: unless-stopped
+    networks:
+      - pulse-net
+    ports:
+      # Expose only on localhost — fronted by Nginx/HAProxy in production
+      - "127.0.0.1:8000:8000"
+    env_file:
+      # Loads all variables from .env (credentials, API keys, JWT secret)
+      - .env
+    environment:
+      # Override URL-type vars with Docker-internal DNS names.
+      # These take precedence over the localhost values in .env.
+      REDIS_URL: "redis://redis:6379/0"
+      KAFKA_BROKER_URL: "kafka:9092"
+      DATABASE_URL_ASYNC: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}"
+      # CORS: whitelist the React dashboard dev server.
+      # Update this to your production domain before deploying.
+      ALLOWED_ORIGINS: "http://localhost:5173,http://localhost:5174,http://localhost:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      # Hits the liveness probe. If the app fails to start or crashes, Docker
+      # will mark it unhealthy and attempt a restart (restart: unless-stopped).
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
