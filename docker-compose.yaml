@@ -1,0 +1,362 @@
+# ==============================================================================
+# PULSE DISTRIBUTED INGESTION ENGINE — PHASE 1: INFRASTRUCTURE
+# ==============================================================================
+# Architecture mandates enforced in this file:
+#
+#  [MANDATE] Isolated Docker network (pulse-net) — internal traffic is assumed
+#            hostile per zero-trust perimeter requirements.
+#  [MANDATE] Health checks on ALL services before dependent services start.
+#  [MANDATE] Kafka dual-listener: INTERNAL (kafka:9092) for container-to-
+#            container, EXTERNAL (0.0.0.0:9094) for host-side tooling/dev.
+#            (system_hurdles_and_guardrails.md — Challenge 5)
+#  [MANDATE] Redis v7 (3.2+) with explicit `--loglevel notice` and no RDB
+#            persistence disabled — effects-based Lua replication is the
+#            default for non-deterministic commands (redis.call('TIME')).
+#            (advanced_distributed_hurdles.md — Challenge 11)
+#  [MANDATE] TimescaleDB credentials sourced strictly from .env file.
+#            No hardcoded credentials in this file.
+#  [MANDATE] Resource limits (cpu + memory) on all services to prevent
+#            runaway scaling during volumetric attacks.
+#            (operations_and_observability_mandates.md § 4)
+#  [MANDATE] postgresql.conf mount for WAL tuning (max_wal_size,
+#            checkpoint_completion_target) to prevent disk exhaustion.
+#            (advanced_distributed_hurdles.md — Challenge 14)
+#
+# Services spun up:
+#   zookeeper      → Kafka coordination broker
+#   kafka          → Apache Kafka message bus
+#   redis          → Global state guard (Lua Token Bucket)
+#   timescaledb    → Analytical vault (PostgreSQL + TimescaleDB extension)
+# ==============================================================================
+
+version: "3.9"
+
+# ------------------------------------------------------------------------------
+# ISOLATED NETWORK
+# All services communicate exclusively on this bridge network.
+# No service should be reachable from outside the host except via explicit
+# port mappings defined below.
+# ------------------------------------------------------------------------------
+networks:
+  pulse-net:
+    driver: bridge
+    name: pulse-net
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+
+# ------------------------------------------------------------------------------
+# NAMED VOLUMES
+# Persist data across container restarts. All data volumes are explicitly named
+# to prevent accidental orphan volumes from polluting the Docker host.
+# ------------------------------------------------------------------------------
+volumes:
+  zookeeper-data:
+    name: pulse_zookeeper_data
+  zookeeper-logs:
+    name: pulse_zookeeper_logs
+  kafka-data:
+    name: pulse_kafka_data
+  redis-data:
+    name: pulse_redis_data
+  timescaledb-data:
+    name: pulse_timescaledb_data
+
+# ==============================================================================
+# SERVICES
+# ==============================================================================
+services:
+
+  # ----------------------------------------------------------------------------
+  # 1. ZOOKEEPER
+  # Apache Kafka coordination service. Required for Kafka cluster metadata,
+  # leader election, and partition assignment.
+  # ----------------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: pulse-zookeeper
+    hostname: zookeeper
+    restart: unless-stopped
+    networks:
+      - pulse-net
+    ports:
+      # Expose only on localhost — no external access needed
+      - "127.0.0.1:2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      # Session timeout: 2 ticks × 2000ms = 4s minimum; 20 ticks max
+      ZOOKEEPER_INIT_LIMIT: 10
+      ZOOKEEPER_SYNC_LIMIT: 5
+      # Suppress leader election noise in logs
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    healthcheck:
+      # ruok = "Are you OK?" — standard Zookeeper four-letter command.
+      # A healthy node responds with "imok".
+      test: [ "CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep imok" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 256M
+
+  # ----------------------------------------------------------------------------
+  # 2. APACHE KAFKA
+  # Core message bus decoupling the FastAPI ingestion layer from the Celery
+  # worker persistence layer.
+  #
+  # [MANDATE — Challenge 5] Dual-listener configuration:
+  #   INTERNAL listener (PLAINTEXT://kafka:9092)  → used by containers on
+  #     pulse-net (FastAPI nodes, Celery workers)
+  #   EXTERNAL listener (EXTERNAL://0.0.0.0:9094) → used by the host machine
+  #     for local tooling, topic creation scripts, and dev inspection.
+  #
+  # [MANDATE — Challenge 12] max.poll.interval.ms and session.timeout.ms are
+  #   set conservatively. Consumer-side tuning (max.poll.records, thread
+  #   decoupling) is done in the application layer; these server-side params
+  #   provide the outer safety boundary.
+  # ----------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: pulse-kafka
+    hostname: kafka
+    restart: unless-stopped
+    networks:
+      - pulse-net
+    ports:
+      # EXTERNAL port: host-only tooling (kafka-topics.sh, admin scripts)
+      - "127.0.0.1:9094:9094"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+
+      # -----------------------------------------------------------------------
+      # DUAL-LISTENER CONFIGURATION
+      # INTERNAL → container-to-container on pulse-net (port 9092)
+      # EXTERNAL → host-machine access for tooling (port 9094)
+      # -----------------------------------------------------------------------
+      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://localhost:9094"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      # -----------------------------------------------------------------------
+      # REPLICATION & PARTITION SETTINGS
+      # Single-broker dev setup: replication factor = 1.
+      # In production this would be 3+ (one per broker).
+      # -----------------------------------------------------------------------
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 3
+
+      # -----------------------------------------------------------------------
+      # CONSUMER HEARTBEAT TUNING
+      # [MANDATE — Challenge 12] Rebalancing storm defense:
+      #   max.poll.interval.ms: 5 minutes — time a consumer can go between
+      #     polls before being evicted. Generous to tolerate slow DB commits.
+      #   session.timeout.ms: 45s — heartbeat liveness window.
+      #   group.initial.rebalance.delay.ms: 3s — prevents immediate rebalance
+      #     when a new consumer joins an empty group.
+      # -----------------------------------------------------------------------
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 3000
+      KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS: 300000
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+
+      # Auto-create topics is disabled. Topics (pulse.events.raw,
+      # pulse.events.dlq) are created explicitly via the kafka-init service
+      # below to enforce correct partition counts and retention policies.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      # JVM heap — sufficient for single-broker dev workload
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # Checks if the broker is accepting connections on the internal port
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1" ]
+      interval: 20s
+      timeout: 15s
+      retries: 6
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.25"
+          memory: 384M
+
+  # ----------------------------------------------------------------------------
+  # 3. KAFKA TOPIC INITIALIZER (ephemeral service)
+  # [MANDATE] Topics are never auto-created. This one-shot container creates
+  # the required topics with explicit configurations:
+  #   pulse.events.raw  → primary ingestion stream (3 partitions)
+  #   pulse.events.dlq  → dead letter queue (1 partition; serial audit trail)
+  # Runs once after Kafka is healthy, then exits (restart: "no").
+  # ----------------------------------------------------------------------------
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: pulse-kafka-init
+    hostname: kafka-init
+    restart: "no"
+    networks:
+      - pulse-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: [ "/bin/bash", "-c" ]
+    command:
+      - |
+        echo "==> [pulse-kafka-init] Creating Kafka topics..."
+
+        kafka-topics --bootstrap-server kafka:9092 \
+          --create --if-not-exists \
+          --topic pulse.events.raw \
+          --partitions 3 \
+          --replication-factor 1 \
+          --config retention.ms=604800000 \
+          --config cleanup.policy=delete
+
+        kafka-topics --bootstrap-server kafka:9092 \
+          --create --if-not-exists \
+          --topic pulse.events.dlq \
+          --partitions 1 \
+          --replication-factor 1 \
+          --config retention.ms=2592000000 \
+          --config cleanup.policy=delete
+
+        echo "==> [pulse-kafka-init] Topics created:"
+        kafka-topics --bootstrap-server kafka:9092 --list
+        echo "==> [pulse-kafka-init] Done. Exiting."
+
+  # ----------------------------------------------------------------------------
+  # 4. REDIS
+  # Global state guard for:
+  #   - Atomic Lua Token Bucket rate limiting (prevents race conditions)
+  #   - Pagination cursor checkpointing (worker crash recovery)
+  #   - Outbound API token tracking (centralized rate limiting for workers)
+  #
+  # [MANDATE — advanced_distributed_hurdles.md Challenge 11]
+  #   Redis 7.x (well above the v3.2 threshold) natively uses effects-based
+  #   replication for non-deterministic Lua commands like redis.call('TIME').
+  #   The evaluated output is replicated, not the script itself, preventing
+  #   replica divergence (split-brain time).
+  #
+  # [MANDATE] AOF persistence is enabled with appendfsync everysec to survive
+  #   container restarts without losing token-bucket state.
+  #   RDB snapshots are disabled (save "") to avoid blocking the single-threaded
+  #   Redis engine during high-load Lua execution cycles.
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: pulse-redis
+    hostname: redis
+    restart: unless-stopped
+    networks:
+      - pulse-net
+    ports:
+      # Expose only on localhost — internal services use redis:6379 on pulse-net
+      - "127.0.0.1:6379:6379"
+    command: >
+      redis-server
+        --loglevel notice
+        --bind 0.0.0.0
+        --protected-mode no
+        --save ""
+        --appendonly yes
+        --appendfsync everysec
+        --no-appendfsync-on-rewrite yes
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --lua-time-limit 5000
+        --slowlog-log-slower-than 10000
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 320M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  # ----------------------------------------------------------------------------
+  # 5. TIMESCALEDB (Analytical Vault)
+  # PostgreSQL with the TimescaleDB extension for time-series query acceleration
+  # on the `ingested_events.created_at` column.
+  #
+  # [MANDATE] Credentials sourced exclusively from .env file — never hardcoded.
+  # [MANDATE] postgresql.conf is bind-mounted to apply WAL tuning:
+  #   max_wal_size          → 4GB  (Challenge 14: prevents WAL disk exhaustion)
+  #   checkpoint_completion → 0.9  (smooth background checkpointing)
+  # [MANDATE] The init SQL script bootstraps the TimescaleDB extension and
+  #   creates the hypertable + indexes in a single idempotent transaction.
+  # ----------------------------------------------------------------------------
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: pulse-timescaledb
+    hostname: timescaledb
+    restart: unless-stopped
+    networks:
+      - pulse-net
+    ports:
+      # Expose only on localhost — application uses timescaledb:5432 on pulse-net
+      - "127.0.0.1:5432:5432"
+    environment:
+      # [MANDATE] All credentials sourced from .env — no hardcoded values
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Performance tuning passed as env vars (supplements postgresql.conf mount)
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      # TimescaleDB-specific: enable telemetry off for privacy
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+      # [MANDATE] Custom postgresql.conf for WAL tuning (Challenge 14)
+      - ./infrastructure/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      # [MANDATE] Init script: extension + schema bootstrap (idempotent)
+      - ./infrastructure/init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
+    command: >
+      postgres
+        -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h localhost" ]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 512M

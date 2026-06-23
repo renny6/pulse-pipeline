@@ -1,10 +1,55 @@
+# ==============================================================================
+# PULSE PIPELINE — .gitignore
+# ==============================================================================
+
+# ---- Python ----
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# ---- Node / Frontend ----
 node_modules/
+dist/
+.next/
+.nuxt/
+.cache/
 
+# ---- Environment & Secrets ----
+# [MANDATE — zero_trust_security.md §5] NEVER commit real credentials
 .env
+.env.local
+.env.production
+.env.staging
 
+# ---- Docker ----
+docker-compose.override.yaml
+
+# ---- OS Artifacts ----
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- Logs ----
+*.log
+logs/
