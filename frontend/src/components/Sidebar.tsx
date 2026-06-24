@@ -6,6 +6,7 @@ import {
   ScrollText,
   WifiOff,
   Cpu,
+  Info
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -42,6 +43,13 @@ const NAV_ITEMS = [
     label: 'Historical Logs',
     sublabel: 'Audit trail',
     Icon: ScrollText,
+    exact: false,
+  },
+  {
+    path: '/about',
+    label: 'About Pulse',
+    sublabel: 'Project overview',
+    Icon: Info,
     exact: false,
   },
 ]

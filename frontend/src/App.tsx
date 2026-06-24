@@ -4,6 +4,7 @@ import LiveSystemMap from './pages/LiveSystemMap'
 import LoadTester from './pages/LoadTester'
 import InfrastructureMonitor from './pages/InfrastructureMonitor'
 import HistoricalLogs from './pages/HistoricalLogs'
+import About from './pages/About'
 import { MetricsProvider } from './contexts/MetricsContext'
 
 /**
@@ -14,6 +15,7 @@ import { MetricsProvider } from './contexts/MetricsContext'
  *   /simulator  → Load Tester       (ingestion burst simulator)
  *   /health     → Infra Monitor     (container health grid)
  *   /audit      → Historical Logs   (TimescaleDB audit trail)
+ *   /about      → About Pulse       (Project overview)
  *   *           → redirect → /
  *
  * All routes are wrapped inside <Layout />, which renders the persistent
@@ -29,6 +31,7 @@ export default function App() {
           <Route path="/simulator" element={<LoadTester />} />
           <Route path="/health"    element={<InfrastructureMonitor />} />
           <Route path="/audit"     element={<HistoricalLogs />} />
+          <Route path="/about"     element={<About />} />
           {/* Catch-all — redirect unknown paths to home */}
           <Route path="*"          element={<Navigate to="/" replace />} />
         </Route>
