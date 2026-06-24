@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Zap, Play, Square } from 'lucide-react'
 import { PageHeader } from './LiveSystemMap'
+import { ThroughputChart } from '../components/ThroughputChart'
 
 /**
  * PAGE: Load Tester  ( route: "/simulator" )
@@ -45,7 +46,7 @@ export default function LoadTester() {
         payload: idx === 0 ? { data: dummyString, _tracking_id: trackingId } : { data: dummyString }
       }));
 
-      fetch('http://127.0.0.1:8000/api/v1/events', {
+      fetch('http://127.0.0.1:8000/api/v1/ingest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(batchPayload)
@@ -219,40 +220,9 @@ export default function LoadTester() {
           ))}
         </div>
 
-        {/* Chart stub */}
-        <div
-          className="panel"
-          style={{
-            flex: 1,
-            minHeight: 160,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            position: 'relative',
-          }}
-        >
-          <div
-            aria-hidden
-            style={{
-              position: 'absolute',
-              inset: 0,
-              backgroundImage: 'radial-gradient(circle, var(--color-border) 1px, transparent 1px)',
-              backgroundSize: '28px 28px',
-              opacity: 0.4,
-            }}
-          />
-          <p
-            style={{
-              fontFamily: 'var(--font-mono)',
-              fontSize: 11,
-              color: 'var(--color-text-secondary)',
-              letterSpacing: '0.08em',
-              zIndex: 1,
-              position: 'relative',
-            }}
-          >
-            THROUGHPUT CHART — Phase 5 implementation
-          </p>
+        {/* Live Recharts component */}
+        <div className="panel flex-1 min-h-[160px]">
+          <ThroughputChart />
         </div>
       </div>
     </div>

@@ -106,3 +106,18 @@ flowchart TD
     Redis -. "Listen to metrics" .-> WS
     WS == "Broadcast via WebSocket" ==> UI
 ```
+
+---
+
+## ✅ System Verification
+
+The pipeline has been rigorously validated for **at-least-once** data delivery guarantees. 
+
+Our automated End-to-End (E2E) integration test verifies the entire asynchronous data flow. The smoke test uses `pytest` to inject 100 uniquely correlated mock events directly into the Kafka ingestion topic, waits for the decoupled consumer daemon to process the batch, and asserts that exactly 100 records are successfully persisted in the TimescaleDB hypertable without data loss or duplication.
+
+To run the verification suite:
+```bash
+docker compose exec api pytest tests/test_e2e_integration.py -v -s
+```
+
+**Status:** `[PASSED]` (2026-06-24)

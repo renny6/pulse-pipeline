@@ -66,6 +66,9 @@ export class WebSocketManager {
 
   private handlePayload(payload: any) {
     console.log("WebSocket Message Received: " + JSON.stringify(payload));
+    
+    // Dispatch raw payload for components like charts that need full history
+    window.dispatchEvent(new CustomEvent('ws:message', { detail: payload }))
 
     // 1. Update Global Metrics Context
     if (this.setMetricsCb) {
