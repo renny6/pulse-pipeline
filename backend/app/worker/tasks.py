@@ -277,12 +277,30 @@ def _route_batch_to_dlq(batch: list[dict], reason: str) -> None:
     """
     try:
         _run_async(_write_all_to_dlq(batch, reason))
+        # Publish to Redis PubSub for WebSocket manager (Causality Diagnostics)
+        _run_async(_publish_dlq_metrics(len(batch), reason))
     except Exception as exc:  # noqa: BLE001
         logger.critical(
             "CRITICAL: DLQ write also failed — %d events permanently lost. error=%s",
             len(batch),
             exc,
         )
+
+async def _publish_dlq_metrics(count: int, reason: str) -> None:
+    """Publish DLQ error metrics to Redis for WebSocket broadcast."""
+    try:
+        import redis.asyncio as aioredis
+        import json
+        from app.config import settings
+        redis = aioredis.from_url(settings.redis_url)
+        await redis.publish("pulse:metrics", json.dumps({
+            "type": "dlq",
+            "reason": reason,
+            "count": count
+        }))
+        await redis.close()
+    except Exception as exc:
+        logger.error("Failed to publish DLQ metrics to Redis: %s", exc)
 
 
 async def _write_all_to_dlq(batch: list[dict], reason: str) -> None:

@@ -1,0 +1,166 @@
+@import "tailwindcss";
+
+/* ============================================================================
+   PULSE DASHBOARD — DESIGN SYSTEM
+   Tailwind v4 CSS-first theme. All custom tokens extend the default theme.
+   Fonts (Inter + JetBrains Mono) are loaded via link tags in index.html.
+   ============================================================================ */
+
+@theme {
+  /* --------------------------------------------------------------------------
+     COLOR PALETTE — Cyber-Physical Control Center
+     -------------------------------------------------------------------------- */
+  --color-black:               #000000;  /* True Black — app background           */
+  --color-charcoal:            #0A0A0A;  /* Deep Charcoal — body/shell background */
+  --color-card:                #111111;  /* Card & panel surfaces                 */
+  --color-border:              #222222;  /* Default UI dividers                   */
+  --color-border-subtle:       #1A1A1A;  /* Inset / recessed borders              */
+
+  /* Status / accent colors */
+  --color-neon-green:          #00FF41;  /* Matrix Green — healthy / live         */
+  --color-crimson:             #FF003C;  /* Crimson — warnings / errors / alerts  */
+  --color-electric-blue:       #00E5FF;  /* Electric Blue — info / active state   */
+
+  /* Dim variants for glow shadows */
+  --color-neon-green-dim:      rgba(0,255,65,0.12);
+  --color-crimson-dim:         rgba(255,0,60,0.15);
+  --color-electric-blue-dim:   rgba(0,229,255,0.12);
+
+  /* Text hierarchy */
+  --color-text-primary:        #E8E8E8;
+  --color-text-secondary:      #666666;
+  --color-text-muted:          #3A3A3A;
+
+  /* --------------------------------------------------------------------------
+     TYPOGRAPHY
+     -------------------------------------------------------------------------- */
+  --font-mono:
+    'JetBrains Mono', 'Fira Code', 'Cascadia Code',
+    ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --font-sans:
+    'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+
+  /* --------------------------------------------------------------------------
+     SIZING
+     -------------------------------------------------------------------------- */
+  --sidebar-width: 220px;
+}
+
+/* ============================================================================
+   GLOBAL BASE RESET & SHELL
+   ============================================================================ */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  background-color: var(--color-charcoal);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============================================================================
+   SCROLLBAR
+   ============================================================================ */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--color-black); }
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-electric-blue); }
+
+/* ============================================================================
+   UTILITY CLASSES
+   ============================================================================ */
+
+/* Tabular numeric rendering — prevents live metric jiggling */
+.tabular-nums {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
+  letter-spacing: 0.02em;
+}
+
+/* Card / panel surface */
+.panel {
+  background-color: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 0;
+}
+
+/* Status glow borders */
+.glow-green {
+  border-color: var(--color-neon-green) !important;
+  box-shadow: 0 0 8px var(--color-neon-green-dim),
+              0 0 1px var(--color-neon-green);
+}
+.glow-red {
+  border-color: var(--color-crimson) !important;
+  box-shadow: 0 0 8px var(--color-crimson-dim),
+              0 0 1px var(--color-crimson);
+}
+.glow-blue {
+  border-color: var(--color-electric-blue) !important;
+  box-shadow: 0 0 8px var(--color-electric-blue-dim),
+              0 0 1px var(--color-electric-blue);
+}
+
+/* Section header label */
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+/* Status dot */
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.green  { background: var(--color-neon-green);    box-shadow: 0 0 6px var(--color-neon-green); }
+.status-dot.red    { background: var(--color-crimson);        box-shadow: 0 0 6px var(--color-crimson); }
+.status-dot.blue   { background: var(--color-electric-blue); box-shadow: 0 0 6px var(--color-electric-blue); }
+.status-dot.muted  { background: var(--color-text-muted); }
+
+/* Pulse animation */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+
+/* Scanline CRT overlay */
+.scanlines::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 3px,
+    rgba(0,0,0,0.04) 3px,
+    rgba(0,0,0,0.04) 4px
+  );
+  z-index: 1;
+}

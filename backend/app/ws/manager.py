@@ -31,24 +31,30 @@ the lock within microseconds — zero impact on gateway response time.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 
 from fastapi import WebSocket
+import redis.asyncio as aioredis
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class _MetricsWindow:
     """Mutable accumulator for a single 100ms metrics window."""
-    __slots__ = ("accepted", "blocked")
+    __slots__ = ("accepted", "blocked", "blocked_reasons", "dlq_errors", "tracking_ids")
 
     def __init__(self) -> None:
         self.accepted: int = 0
         self.blocked: int = 0
+        self.blocked_reasons: dict[str, int] = {}
+        self.dlq_errors: int = 0
+        self.tracking_ids: list[str] = []
 
     def is_empty(self) -> bool:
-        return self.accepted == 0 and self.blocked == 0
+        return self.accepted == 0 and self.blocked == 0 and self.dlq_errors == 0
 
 
 class WebSocketManager:
@@ -74,6 +80,7 @@ class WebSocketManager:
         self._window = _MetricsWindow()
         self._lock = asyncio.Lock()
         self._broadcaster_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._pubsub_task: asyncio.Task | None = None
 
     # --------------------------------------------------------------------------
     # Lifecycle
@@ -85,16 +92,21 @@ class WebSocketManager:
             self._broadcast_loop(),
             name="ws-broadcaster",
         )
-        logger.info("WebSocket broadcaster started (window=%dms).", self._window_ms)
+        self._pubsub_task = asyncio.create_task(
+            self._redis_pubsub_loop(),
+            name="ws-pubsub",
+        )
+        logger.info("WebSocket broadcaster and pubsub started (window=%dms).", self._window_ms)
 
     async def shutdown(self) -> None:
         """Cancel the broadcaster and close all open connections gracefully."""
-        if self._broadcaster_task and not self._broadcaster_task.done():
-            self._broadcaster_task.cancel()
-            try:
-                await self._broadcaster_task
-            except asyncio.CancelledError:
-                pass
+        for task in [self._broadcaster_task, self._pubsub_task]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         async with self._lock:
             connections_snapshot = set(self._connections)
@@ -134,7 +146,7 @@ class WebSocketManager:
     # Metric accumulation — called on EVERY ingestion event
     # --------------------------------------------------------------------------
 
-    async def record_event(self, *, accepted: bool) -> None:
+    async def record_event(self, *, accepted: bool, reason: str | None = None, tracking_id: str | None = None) -> None:
         """
         Thread-safe metric counter increment.
 
@@ -147,6 +159,10 @@ class WebSocketManager:
                 self._window.accepted += 1
             else:
                 self._window.blocked += 1
+                if reason:
+                    self._window.blocked_reasons[reason] = self._window.blocked_reasons.get(reason, 0) + 1
+            if tracking_id:
+                self._window.tracking_ids.append(tracking_id)
 
     # --------------------------------------------------------------------------
     # Background broadcast loop
@@ -173,6 +189,9 @@ class WebSocketManager:
                 payload = {
                     "accepted": self._window.accepted,
                     "blocked": self._window.blocked,
+                    "blocked_reasons": self._window.blocked_reasons,
+                    "dlq_errors": self._window.dlq_errors,
+                    "tracking_ids": self._window.tracking_ids,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 self._window = _MetricsWindow()
@@ -193,6 +212,35 @@ class WebSocketManager:
                 logger.info(
                     "Cleaned up %d dead WebSocket connection(s).", len(dead)
                 )
+
+    # --------------------------------------------------------------------------
+    # Background PubSub loop
+    # --------------------------------------------------------------------------
+
+    async def _redis_pubsub_loop(self) -> None:
+        """
+        Subscribes to Redis PubSub 'pulse:metrics' channel.
+        Receives cross-container error reports (e.g. from celery-worker)
+        and increments local _MetricsWindow counters before broadcast.
+        """
+        redis = aioredis.from_url(settings.redis_url)
+        pubsub = redis.pubsub()
+        await pubsub.subscribe("pulse:metrics")
+        
+        try:
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    data = json.loads(message["data"])
+                    if data.get("type") == "dlq":
+                        async with self._lock:
+                            self._window.dlq_errors += data.get("count", 1)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error("Redis PubSub loop failed: %s", exc)
+        finally:
+            await pubsub.unsubscribe()
+            await redis.close()
 
 
 # ---------------------------------------------------------------------------

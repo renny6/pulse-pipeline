@@ -69,6 +69,12 @@ async def liveness() -> LivenessResponse:
     )
 
 
+class ReadinessSystemResponse(BaseModel):
+    status: str
+    redis: str
+    postgres: str
+    kafka: str
+
 # ==============================================================================
 # Readiness probe — checks Redis connectivity
 # ==============================================================================
@@ -98,6 +104,78 @@ async def readiness(redis: aioredis.Redis = Depends(get_redis)) -> ReadinessResp
         ) from exc
 
     return ReadinessResponse(status="ready", redis=redis_status)
+
+# ==============================================================================
+# System Health probe — checks ALL dependent services
+# ==============================================================================
+
+@router.get(
+    "/health/system",
+    response_model=ReadinessSystemResponse,
+    summary="System Health probe",
+    tags=["Health"],
+)
+async def system_health(redis: aioredis.Redis = Depends(get_redis)) -> ReadinessSystemResponse:
+    """
+    Detailed health check for the UI widget. Checks Redis, Postgres, and Kafka.
+    """
+    redis_status = "unreachable"
+    postgres_status = "unreachable"
+    kafka_status = "unreachable"
+    
+    # 1. Check Redis
+    try:
+        await redis.ping()
+        redis_status = "ok"
+    except Exception:
+        pass
+
+    # 2. Check Postgres
+    try:
+        from app.db.engine import get_engine
+        # Synchronous check using asyncpg isn't ideal here, but we can do a quick async check
+        # Actually, get_engine() is synchronous, but the session is async.
+        from app.db.engine import get_session_factory
+        session_factory = get_session_factory()
+        from sqlalchemy import text
+        async with session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        postgres_status = "ok"
+    except Exception:
+        pass
+
+    # 3. Check Kafka
+    try:
+        # Since we just want a quick ping, we can use the app's producer if available
+        # But a robust way is checking the producer state or sending a dummy request.
+        # For simplicity in this widget, we'll rely on producer being injected if available,
+        # or we just try a quick socket connect.
+        # A simpler way: just check if producer is connected.
+        # The producer is in request.app.state.kafka_producer
+        pass
+    except Exception:
+        pass
+
+    # A better approach for Kafka: check if the global producer has partitions for pulse.events.raw
+    # To keep it completely independent, let's just use aiokafka AIOKafkaProducer to connect and get metadata, or simpler, we can just use asyncio.open_connection to the broker port
+    try:
+        from app.config import settings
+        host, port = settings.kafka_broker_url.split(":")
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, int(port)), timeout=2.0)
+        writer.close()
+        await writer.wait_closed()
+        kafka_status = "ok"
+    except Exception:
+        pass
+
+    overall = "ready" if redis_status == "ok" and postgres_status == "ok" and kafka_status == "ok" else "degraded"
+    
+    return ReadinessSystemResponse(
+        status=overall,
+        redis=redis_status,
+        postgres=postgres_status,
+        kafka=kafka_status
+    )
 
 
 # ==============================================================================
