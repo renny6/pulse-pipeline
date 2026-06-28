@@ -4,6 +4,9 @@
 
 Pulse Pipeline is engineered to ingest, buffer, and persist immense telemetry data streams. By decoupling the fast ingestion boundary from the downstream storage layer, the system provides high availability and zero data loss under massive traffic spikes, all while giving operators a live, tactical view of system health and throughput.
 
+![Pulse Pipeline System Overview](docs/assets/about%20pulse.png)
+*Figure 1: Pulse Pipeline Overview - High-performance distributed telemetry ingestion architecture, showcasing decoupled event streams, rate limiting, and real-time visualization.*
+
 ---
 
 ## 🏗️ Architecture
@@ -16,6 +19,9 @@ Pulse utilizes a distributed, resilient architecture to guarantee data durabilit
 4. **TimescaleDB:** A robust PostgreSQL extension tailored for time-series data, acting as the final cold storage.
 5. **WebSocket Dashboard:** A React frontend that connects to the FastAPI backend via WebSockets. It receives a 100ms batched metric stream to render the live data topology without succumbing to backpressure.
 
+![Infrastructure Status Monitor](docs/assets/pulse%20infra%20moniter.png)
+*Figure 2: Infrastructure Status Monitor - Live health checks and connection state verification for Kafka, Redis, and TimescaleDB containers.*
+
 ---
 
 ## ✨ Key Features
@@ -24,6 +30,13 @@ Pulse utilizes a distributed, resilient architecture to guarantee data durabilit
 - **Causality Diagnostics:** Detailed error reporting prevents silent failures. Dropped events (e.g., DLQ failures, rate limits) trigger alerts via Redis PubSub, broadcasting the failure reason straight to the frontend.
 - **System Health Widget:** Active polling constantly checks the status of Redis, TimescaleDB, and Kafka, illuminating red or green indicator dots to immediately surface infrastructure outages.
 - **Anti-Backpressure UI:** The frontend leverages `@xyflow/react` and custom HTML5 canvas rendering to visualize thousands of events per second without crashing the browser.
+
+---
+
+## 📊 System Visualization
+
+![Pulse Dashboard](docs/assets/pulse%20dashboard.png)
+*Figure 3: Real-Time Tactical Control Center - The GPU-accelerated HTML5 Canvas rendering dashboard showing live network throughput, partition workloads, and node latencies.*
 
 ---
 
@@ -63,6 +76,9 @@ Ensure you have **Docker** and **Docker Compose** installed.
 
 4. **Observe:**
    Open `http://localhost:5173/` in your browser. Use the Load Tester module to simulate a massive traffic spike and watch the system absorb it.
+
+![API Ingestion Interface](docs/assets/api%20pulse%20.png)
+*Figure 4: API Gateway Ingestion - The FastAPI `/api/v1/ingest` interface, designed for sub-5ms payload validation and edge token-bucket throttling.*
 
 ---
 
@@ -121,3 +137,13 @@ docker compose exec api pytest tests/test_e2e_integration.py -v -s
 ```
 
 **Status:** `[PASSED]` (2026-06-24)
+
+### Historical Log Persistence
+
+![Historical Logs](docs/assets/pulse%20historical%20logs.png)
+*Figure 5: Historical Logs & Persistence - Cold storage query analytics and audit trail of ingested events verified in TimescaleDB database.*
+
+### Volumetric Load Testing
+
+![Load Tester](docs/assets/pulse%20loadtester.png)
+*Figure 6: Volumetric Load Tester - High-throughput traffic generator simulating spike injections of up to 5,000 requests per second to evaluate pipeline backpressure.*
